@@ -1,12 +1,54 @@
-# React + Vite
+# 🌌 HyperTwist Visualization — React + Vite
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This project provides an interactive, real-time **visualization of space-time curvature** based on the HyperTwist metric — a geometric alternative to dark matter and dark energy.
 
-Currently, two official plugins are available:
+Built with **React + Vite** for performance and Hot Module Replacement (HMR), it simulates:
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+-   **Gravitational funnel** with radial and angular deformation,
+-   **Planetary orbits** computed from a metric-derived geometry,
+-   **Dynamic particle flows** (ascend, collapse, return),
+-   **Tensor field overlays**: φ, \( R*{rr} \), \( G*{rr} \), \( \mathcal{K} \),
+-   **Live plots** of the metric components \( g*{rr}(r) \), \( g*{rθ}(r) \), and \( g\_{θθ}(r) \).
 
-## Expanding the ESLint configuration
+---
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## 📐 Underlying Geometry
+
+The metric used:
+
+\[
+ds^2 = -f(r) dt^2 + g*{rr}(r) dr^2 + 2g*{r\theta}(r) dr d\theta + g\_{\theta\theta}(r) d\theta^2 + dz^2
+\]
+
+Where:
+
+-   \( g\_{rr}(r) = \frac{\pi r^2 + 16(r^2 + 2r + 1)^2}{16(1 + r)^6} \)
+-   \( g\_{r\theta}(r) = -\frac{\pi r^2}{(1 + r)^4} \)
+-   \( g\_{\theta\theta}(r) = \frac{r^2}{(1 + r)^2} \)
+
+Time-slowing field:  
+\[
+\phi(r) = e^{-r^2}
+\]
+
+---
+
+## ⚙️ Tech Stack
+
+-   **React** for declarative UI
+-   **Vite** for instant HMR and bundling
+-   **Canvas API** for low-level 2D rendering
+-   **Easing-utils** for smooth animations
+-   **Custom numerical models** for geodesics, tensor fields, and curvature
+
+---
+
+## 🧪 Development
+
+```bash
+npm install
+npm run dev
+```
+
+Developed by Andrey Leonov
+Model: HyperTwist — form-based alternative to general relativity
