@@ -34,17 +34,29 @@ const SinkHole = forwardRef((props, ref) => {
             tilt: Math.PI / 4,
             drop: 1.5,
             perspective: 4,
+            globalScale: 1.0,
         });
 
         const onWheel = (e) => {
             e.preventDefault();
             const zoomFactor = 1.05;
-            if (e.deltaY < 0) {
-                state.zoom *= zoomFactor;
+            if (e.shiftKey) {
+                // Глобальное приближение всей сцены
+                if (e.deltaY < 0) {
+                    state.globalScale *= zoomFactor;
+                } else {
+                    state.globalScale /= zoomFactor;
+                }
+                state.globalScale = Math.max(0.1, Math.min(4.0, state.globalScale));
             } else {
-                state.zoom /= zoomFactor;
+                // Локальный зум (внутренние эффекты HyperTwist)
+                if (e.deltaY < 0) {
+                    state.zoom *= zoomFactor;
+                } else {
+                    state.zoom /= zoomFactor;
+                }
+                state.zoom = Math.min(5.0, Math.max(0.05, state.zoom));
             }
-            state.zoom = Math.min(5.0, Math.max(0.05, state.zoom)); // ограничения
         };
 
         const onResize = () => {
@@ -80,6 +92,104 @@ const SinkHole = forwardRef((props, ref) => {
 /* ======================================================================== */
 /*                               helpers                                    */
 /* ======================================================================== */
+
+function g_rr(r) {
+    const numerator = Math.PI * r * r + 16 * Math.pow(r * r + 2 * r + 1, 2);
+    const denominator = 16 * Math.pow(1 + r, 6);
+    return numerator / denominator;
+}
+
+function phiField(x, y) {
+    const r = Math.sqrt(x * x + y * y);
+    return Math.exp(-r * r);
+}
+
+function gradPhiField(x, y) {
+    const r = Math.sqrt(x * x + y * y);
+    if (r === 0) return { dx: 0, dy: 0 };
+    const phi = Math.exp(-r * r);
+    const dPhiDr = -2 * r * phi;
+    return {
+        dx: dPhiDr * (x / r),
+        dy: dPhiDr * (y / r),
+    };
+}
+
+function initFlowParticle() {
+    return {
+        x: 0.01,
+        y: 0.0,
+        path: [],
+    };
+}
+function initReflectedFlowParticle() {
+    return {
+        x: 1.45,
+        y: 0.0,
+        path: [],
+    };
+}
+
+function getTimeColorByPhi(phi) {
+    const t = Math.min(1, Math.max(0, phi)); // [0,1]
+    const r = Math.round(255 * (1 - t)); // φ→0 → r=255 (красный)
+    const g = Math.round(100 * t); // φ→1 → g=100 (зеленоватый)
+    const b = Math.round(255 * t); // φ→1 → b=255 (синий)
+    return `rgba(${r},${g},${b},0.4)`; // прозрачный ореол
+}
+
+function stepFlowParticle(p, dt = 0.01) {
+    const grad = gradPhiField(p.x, p.y);
+    const vx = -grad.dx;
+    const vy = -grad.dy;
+    return {
+        x: p.x + dt * vx,
+        y: p.y + dt * vy,
+        path: [...p.path, [p.x, p.y]],
+    };
+}
+
+function stepReflectedFlowParticle(p, dt = 0.01) {
+    const grad = gradPhiField(p.x, p.y);
+    const vx = grad.dx; // обратное направление
+    const vy = grad.dy;
+    return {
+        x: p.x + dt * vx,
+        y: p.y + dt * vy,
+        path: [...p.path, [p.x, p.y]],
+    };
+}
+
+function drawFlowPath(ctx, state) {
+    if (state.flowParticle) {
+        drawPath(ctx, state.flowParticle.path, state, 'cyan');
+    }
+    if (state.reflectedParticle) {
+        drawPath(ctx, state.reflectedParticle.path, state, 'orange');
+    }
+}
+
+function drawPath(ctx, path, state, color) {
+    const { render, zoom, startDisc } = state;
+    const cx = startDisc.x;
+    const cy = startDisc.y;
+
+    ctx.beginPath();
+    path.forEach(([x, y], i) => {
+        const twisted = hyperTwistCircular(x, y, zoom);
+        const px = cx + twisted.x * render.width * 0.2;
+        const py = cy + twisted.y * render.height * 0.2;
+
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    });
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.7;
+    ctx.stroke();
+    ctx.globalAlpha = 1.0;
+}
 
 function getEaseFn(name = 'linear') {
     if (typeof easingUtils[name] === 'function') return easingUtils[name];
@@ -126,17 +236,6 @@ function setDiscs(state, rect) {
     state.clip.path = new Path2D();
     state.clip.path.ellipse(x, y, w, h, 0, 0, Math.PI * 2);
     state.clip.path.rect(x - w, 0, w * 2, y);
-}
-
-function transformTwist(x, y, a = 1, b = 1) {
-    const r = Math.sqrt(x * x + y * y);
-    const θ = Math.atan2(y, x);
-    const R = r * (1 - a / (r * r + b));
-    const T = Math.PI / (4 * (1 + r));
-    return {
-        x: R * Math.cos(θ + T),
-        y: R * Math.sin(θ + T),
-    };
 }
 
 function setLines(state, rect) {
@@ -239,47 +338,6 @@ function tweenDisc(disc, state) {
     disc.w = tween(s.w, e.w, disc.p);
     disc.h = tween(s.h, e.h, disc.p);
     return disc;
-}
-
-function emitCoreParticles(state) {
-    if (!state.coreParticles) state.coreParticles = [];
-    if (state.coreParticles.length < 300) {
-        for (let i = 0; i < 4; i++) {
-            const angle = Math.random() * 2 * Math.PI;
-            const speed = 0.005 + Math.random() * 0.01;
-            state.coreParticles.push({
-                r: 0,
-                θ: angle,
-                v: speed,
-                alpha: 1.0,
-                color: `hsla(${Math.random() * 360}, 100%, 70%, 1)`,
-            });
-        }
-    }
-}
-
-function drawCoreParticles(ctx, state) {
-    const cx = state.startDisc.x;
-    const cy = state.startDisc.y;
-    const { render, zoom } = state;
-    state.coreParticles.forEach((p) => {
-        p.r += p.v;
-        p.alpha -= 0.005;
-
-        const x = p.r * Math.cos(p.θ);
-        const y = p.r * Math.sin(p.θ);
-        const pt = hyperTwistCircular(x, y, zoom);
-        const px = cx + pt.x * render.width * 0.2;
-        const py = cy + pt.y * render.height * 0.2;
-
-        ctx.globalAlpha = p.alpha;
-        ctx.fillStyle = p.color;
-        ctx.beginPath();
-        ctx.arc(px, py, 2, 0, 2 * Math.PI);
-        ctx.fill();
-    });
-    ctx.globalAlpha = 1.0;
-    state.coreParticles = state.coreParticles.filter((p) => p.alpha > 0);
 }
 
 function emitCoreSinkParticles(state) {
@@ -414,15 +472,71 @@ function drawCoreSpiralParticles(ctx, state) {
     state.coreParticles = state.coreParticles.filter((p) => p.alpha > 0);
 }
 
+function emitUpwardStreamParticles(state) {
+    if (!state.upwardStream) state.upwardStream = [];
+
+    const MAX_STREAM_PARTICLES = 200;
+    const BATCH = 6;
+
+    if (state.upwardStream.length < MAX_STREAM_PARTICLES) {
+        for (let i = 0; i < BATCH; i++) {
+            state.upwardStream.push({
+                xOffset: (Math.random() - 0.5) * 0.2, // небольшое горизонтальное отклонение
+                y: 0,
+                v: 1.2 + Math.random() * 1.3, // скорость вверх
+                alpha: 1.0,
+                size: 1.5 + Math.random() * 1.0,
+                color: `hsla(200, 100%, 80%, 1)`,
+            });
+        }
+    }
+}
+
+function drawUpwardStreamParticles(ctx, state) {
+    const { render, endDisc, startDisc } = state;
+    const cx = endDisc.x;
+    const cy = endDisc.y;
+    const targetY = startDisc.y;
+
+    state.upwardStream.forEach((p) => {
+        p.y += p.v;
+        p.alpha -= 0.005;
+
+        const px = cx + p.xOffset * render.width * 0.05;
+        const py = cy - p.y;
+
+        ctx.save();
+        ctx.globalAlpha = p.alpha;
+        ctx.fillStyle = p.color;
+        ctx.shadowColor = p.color;
+        ctx.shadowBlur = 8;
+        ctx.beginPath();
+        ctx.arc(px, py, p.size, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.restore();
+    });
+
+    state.upwardStream = state.upwardStream.filter((p) => p.alpha > 0 && cy - p.y > targetY - 20);
+    emitUpwardStreamParticles(state);
+}
+
 function tick(state) {
     const { ctx, canvas, render } = state;
+    if (!state.centerBursts) state.centerBursts = [];
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.save();
     ctx.scale(render.dpi, render.dpi);
 
+    // применим глобальный масштаб:
+    ctx.translate(render.width / 2, render.height / 2);
+    ctx.scale(state.globalScale, state.globalScale);
+    ctx.translate(-render.width / 2, -render.height / 2);
+
     moveDiscs(state);
     // moveParticles(state);
+    emitUpwardStreamParticles(state);
+    drawUpwardStreamParticles(ctx, state);
 
     emitCoreSinkParticles(state);
     drawCoreSinkParticles(ctx, state);
@@ -431,8 +545,6 @@ function tick(state) {
     drawCoreSpiralParticles(ctx, state);
     drawDiscs(state);
     drawLines(state);
-    drawParticles(state);
-    drawPlanet(state, performance.now());
 
     drawOrbitalPlanes(state);
     drawOrbitingPlanets(state, performance.now());
@@ -443,8 +555,58 @@ function tick(state) {
         state.zoom += (targetZoom - state.zoom) * ease;
     }
 
+    drawGrPlot(ctx, state);
+
+    // if (!state.flowParticle) state.flowParticle = initFlowParticle();
+    // state.flowParticle = stepFlowParticle(state.flowParticle);
+
+    // if (!state.reflectedParticle) state.reflectedParticle = initReflectedFlowParticle();
+    // state.reflectedParticle = stepReflectedFlowParticle(state.reflectedParticle);
+
+    // drawFlowPath(ctx, state);
+
     ctx.restore();
     state.raf = requestAnimationFrame(() => tick(state));
+}
+
+function drawGrPlot(ctx, state) {
+    const { render } = state;
+    const W = 150;
+    const H = 100;
+    const x0 = render.width - W - 10;
+    const y0 = 10;
+
+    // Границы осей
+    const rMin = 0;
+    const rMax = 2;
+    const grMin = 0;
+    const grMax = 1.2;
+
+    // Основа
+    ctx.save();
+    ctx.strokeStyle = '#888';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x0, y0, W, H);
+
+    ctx.beginPath();
+    for (let i = 0; i <= 100; i++) {
+        const r = rMin + (rMax - rMin) * (i / 100);
+        const gr = g_rr(r);
+        const px = x0 + ((r - rMin) / (rMax - rMin)) * W;
+        const py = y0 + H - ((gr - grMin) / (grMax - grMin)) * H;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+
+    ctx.strokeStyle = 'lime';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+
+    // Подпись
+    ctx.fillStyle = 'white';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('g_rr(r)', x0 + 5, y0 + 15);
 }
 
 function moveDiscs(state) {
@@ -452,17 +614,6 @@ function moveDiscs(state) {
         d.p = (d.p + 0.001) % 1;
         tweenDisc(d, state);
     });
-}
-
-function getOrbital3DPosition(radius, angle, tilt, drop, perspective) {
-    const x = radius * Math.cos(angle);
-    const y = radius * Math.sin(angle);
-    const z = drop * radius ** 2;
-
-    const yT = y * Math.cos(tilt) - z * Math.sin(tilt);
-    const zT = y * Math.sin(tilt) + z * Math.cos(tilt);
-
-    return project3D(x, yT, zT, perspective);
 }
 
 function drawOrbitingPlanets(state, time) {
@@ -485,9 +636,8 @@ function drawOrbitingPlanets(state, time) {
 
     ctx.save();
 
-    // Коэффициенты вихря:
-    const A = 3.5 + Math.sin(t * 0.1) * 0.5; // вихрь пульсирует
-    const B = 2.2 + Math.cos(t * 0.07) * 0.3; // вихрь дышит медленно
+    const A = 3.5 + Math.sin(t * 0.1) * 0.5;
+    const B = 2.2 + Math.cos(t * 0.07) * 0.3;
 
     planets.forEach(({ radius, size, period, color }) => {
         const omega_orbit = (2 * Math.PI) / period;
@@ -499,17 +649,25 @@ function drawOrbitingPlanets(state, time) {
         const px = cx + twisted.x * render.width * 0.2;
         const py = cy + twisted.y * render.height * 0.2;
 
-        // Угловое вращение по собственной оси
+        // φ(r) визуализация времени
+        const rPlan = Math.sqrt(rawX ** 2 + rawY ** 2);
+        const phi = Math.exp(-(rPlan ** 2));
+
+        // Цветовая аура времени
+        ctx.beginPath();
+        ctx.arc(px, py, size + 5, 0, 2 * Math.PI);
+        ctx.fillStyle = getTimeColorByPhi(phi);
+        ctx.fill();
+
+        // Вращение по оси
         const omega_spin = A / Math.pow(1 + radius, B);
         const spinAngle = t * omega_spin;
 
-        // Вращаем планету
         ctx.save();
         ctx.translate(px, py);
         ctx.rotate(spinAngle);
         ctx.beginPath();
         ctx.arc(0, 0, size, 0, 2 * Math.PI);
-
         ctx.fillStyle = color;
         ctx.shadowColor = `${color}55`;
         ctx.shadowBlur = 8;
@@ -518,7 +676,7 @@ function drawOrbitingPlanets(state, time) {
         ctx.restore();
     });
 
-    // 🌞 Солнце с пульсацией и вращением
+    // Солнце
     const pulse = 2 + Math.sin(t * 3) * 1.5;
     const baseRadius = 10 + pulse;
     const gradient = ctx.createRadialGradient(cx, cy, baseRadius * 0.3, cx, cy, baseRadius);
@@ -540,16 +698,6 @@ function drawOrbitingPlanets(state, time) {
     ctx.shadowBlur = 0;
 
     ctx.restore();
-}
-
-function moveParticles(state) {
-    const { particleArea, particles } = state;
-    particles.forEach((p) => {
-        p.p = 1 - p.y / particleArea.h;
-        p.x = p.sx + p.dx * p.p;
-        p.y += p.vy;
-        if (p.y > particleArea.h) Object.assign(p, initParticle(state));
-    });
 }
 
 function drawDiscs(state) {
@@ -586,14 +734,8 @@ function drawDiscs(state) {
 function drawOrbitalPlanes(state) {
     const { ctx, render, zoom, startDisc } = state;
 
-    const canvasWidth = render.width;
-    const canvasHeight = render.height;
-
     const cx = startDisc.x;
     const cy = startDisc.y;
-
-    const transition = getTransition(zoom);
-    const intensity = 2.5 * Math.sin(performance.now() * 0.001);
 
     const orbits = [
         { radius: 0.2, color: '#aaa' },
@@ -644,359 +786,37 @@ function drawOrbitalPlanes(state) {
 
 function drawLines(state) {
     const { ctx, linesCanvas, render } = state;
-    ctx.drawImage(linesCanvas, 0, 0, linesCanvas.width, linesCanvas.height, 0, 0, render.width, render.height);
-}
-
-function drawParticles(state) {
-    const { ctx, particles, clip } = state;
-    ctx.save();
-    ctx.clip(clip.path);
-    particles.forEach((p) => {
-        ctx.fillStyle = p.c;
-        ctx.fillRect(p.x, p.y, p.r, p.r);
-    });
-    ctx.restore();
-}
-
-function generatePlanetPoint(θ, φ, radius, spin = 0) {
-    const dx = Math.cos(θ + spin) * Math.cos(φ) * radius;
-    const dy = Math.sin(φ) * radius;
-    return { dx, dy };
-}
-
-function transformHyperTwist(x, y, zoom = 1.0, a = 2.5, b = 0.5, strength = 1.0) {
-    const scale = zoom;
-    const rx = x * scale;
-    const ry = y * scale;
-    const r = Math.sqrt(rx * rx + ry * ry);
-    const θ = Math.atan2(ry, rx);
-    const R = r * (1 - strength * (a / (r * r + b)));
-    const T = strength * (Math.PI / (4 * (1 + r)));
-    return {
-        x: R * Math.cos(θ + T),
-        y: R * Math.sin(θ + T),
-    };
-}
-
-// ...весь предыдущий код остаётся без изменений до drawPlanet()
-
-function drawPlanet(state, time) {
-    const { ctx, zoom, render } = state;
-    // const center = {
-    //     x: render.width / 2,
-    //     y: render.height / 2,
-    // };
-    // drawHyperTwistPlanet(ctx, center, zoom, time);
-
-    // drawHyperTwistGrid(ctx, zoom, time, 50, state.clip.path);
+    const extra = 400; // должен совпадать
+    ctx.drawImage(linesCanvas, 0, 0, linesCanvas.width, linesCanvas.height, -extra / 2, -extra / 2, render.width + extra, render.height + extra);
 }
 
 function getTransition(zoom, min = 0.05, max = 5.0) {
     return (max - zoom) / (max - min);
 }
 
-// без скручивания точек
-// function hyperTwistCircular(x, y, zoom) {
-//     const t = getTransition(zoom);
-//     const r = Math.sqrt(x * x + y * y);
-//     const theta = Math.atan2(y, x);
-//     const rNew = (1 - t) * r + t * Math.tanh(r);
-//     const thetaNew = theta + t * Math.exp(-r);
-//     return {
-//         x: rNew * Math.cos(thetaNew),
-//         y: rNew * Math.sin(thetaNew),
-//     };
-// }
+function g_rθ(r) {
+    return (-Math.PI * r * r) / Math.pow(1 + r, 4);
+}
+
+function g_θθ(r) {
+    return (r * r) / Math.pow(1 + r, 2);
+}
 
 function hyperTwistCircular(x, y, zoom, intensity = 2.5) {
     const t = getTransition(zoom);
     const r = Math.sqrt(x * x + y * y);
     const theta = Math.atan2(y, x);
+
+    // скручивание по g_{rθ}(r)
+    const twist = g_rθ(r) * intensity;
+
+    const thetaNew = theta + t * twist;
     const rNew = (1 - t) * r + t * Math.tanh(r);
-    const thetaNew = theta + t * intensity * Math.exp(-r);
+
     return {
         x: rNew * Math.cos(thetaNew),
         y: rNew * Math.sin(thetaNew),
     };
-}
-
-// function hyperTwistCircular(x, y, zoom, intensity = 1.0) {
-//     const t = getTransition(zoom); // от 1 (далеко) до 0 (вблизи)
-//     const r = Math.sqrt(x * x + y * y);
-//     const theta = Math.atan2(y, x);
-
-//     // Подогнанное вихревое поле
-//     const A = 69.98;
-//     const B = 54.15;
-//     const omega = A / Math.pow(1 + r, B); // вихревая угловая скорость
-
-//     // Геометрическое скручивание
-//     const thetaNew = theta + t * intensity * omega; // t → приближение усиливает
-//     const rNew = r; // можно добавить tanh(r) или подобное при желании
-
-//     return {
-//         x: rNew * Math.cos(thetaNew),
-//         y: rNew * Math.sin(thetaNew),
-//     };
-// }
-
-//ПЛАНЕТА КЛАССИК
-// function drawHyperTwistPlanet(ctx, center, zoom, time) {
-//     const baseRadius = 150;
-//     const transition = getTransition(zoom);
-//     const radius = baseRadius * (zoom / (1 + zoom));
-//     const x = center.x;
-//     const y = center.y;
-//     const spinAngle = (time * 0.001) % (Math.PI * 2);
-//     const axialTilt = (23.5 * Math.PI) / 180;
-
-//     ctx.save();
-//     ctx.translate(x, y);
-//     ctx.rotate(axialTilt);
-
-//     // Контур планеты
-//     ctx.beginPath();
-//     for (let i = 0; i <= 360; i++) {
-//         const θ = (i / 360) * Math.PI * 2;
-//         const dx = Math.cos(θ) * radius;
-//         const flatten = 1 - transition * 0.8;
-//         const dy = Math.sin(θ) * radius * flatten;
-//         const p = hyperTwistCircular(dx, dy, zoom);
-//         if (i === 0) ctx.moveTo(p.x, p.y);
-//         else ctx.lineTo(p.x, p.y);
-//     }
-//     ctx.closePath();
-//     ctx.shadowColor = 'rgba(100,200,255,0.4)';
-//     ctx.shadowBlur = 25;
-//     ctx.fillStyle = '#3af';
-//     ctx.fill();
-//     ctx.shadowBlur = 0;
-//     ctx.strokeStyle = '#08f';
-//     ctx.lineWidth = 2;
-//     ctx.stroke();
-
-//     // Сетка: меридианы
-//     const nMeridians = 12;
-//     const nParallels = 6;
-//     ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-//     ctx.lineWidth = 1;
-
-//     for (let i = 0; i < nMeridians; i++) {
-//         const θ0 = (i / nMeridians) * Math.PI * 2;
-//         ctx.beginPath();
-//         for (let j = 0; j <= 100; j++) {
-//             const φ = (j / 100) * Math.PI - Math.PI / 2;
-//             const dx = Math.cos(θ0 + spinAngle) * Math.cos(φ) * radius;
-//             const dy = Math.sin(φ) * radius * (1 - transition * 0.8);
-//             const p = hyperTwistCircular(dx, dy, zoom);
-//             if (j === 0) ctx.moveTo(p.x, p.y);
-//             else ctx.lineTo(p.x, p.y);
-//         }
-//         ctx.stroke();
-//     }
-
-//     // Сетка: параллели
-//     for (let j = 1; j < nParallels; j++) {
-//         const φ = (j / (nParallels + 1)) * Math.PI - Math.PI / 2;
-//         const dy = Math.sin(φ) * radius * (1 - transition * 0.8);
-//         const r0 = Math.abs(Math.cos(φ) * radius);
-//         ctx.beginPath();
-//         for (let i = 0; i <= 100; i++) {
-//             const θ = (i / 100) * Math.PI * 2;
-//             const dx = Math.cos(θ) * r0;
-//             const p = hyperTwistCircular(dx, dy, zoom);
-//             if (i === 0) ctx.moveTo(p.x, p.y);
-//             else ctx.lineTo(p.x, p.y);
-//         }
-//         ctx.stroke();
-//     }
-
-//     ctx.restore();
-// }
-
-// # ----- ----- ------- - -- - - - - - -
-// function drawHyperTwistGrid(ctx, zoom, time, gridSize = 50) {
-//     const extent = 5;
-//     const step = (extent * 2) / gridSize;
-
-//     ctx.save();
-
-//     const canvasWidth = ctx.canvas.width / window.devicePixelRatio;
-//     const canvasHeight = ctx.canvas.height / window.devicePixelRatio;
-//     const scale = Math.min(canvasWidth, canvasHeight) / (extent * 2);
-
-//     ctx.translate(canvasWidth / 2, canvasHeight / 2);
-//     ctx.scale(scale, -scale);
-
-//     const intensity = 2.5 * Math.sin(time * 0.001);
-//     const spinAngle = (time * 0.0002) % (2 * Math.PI);
-//     const axialTilt = (23.5 * Math.PI) / 180;
-
-//     const cosTilt = Math.cos(axialTilt);
-//     const sinTilt = Math.sin(axialTilt);
-
-//     for (let i = -extent; i <= extent; i += step) {
-//         for (let j = -extent; j <= extent; j += step) {
-//             const r0 = Math.sqrt(i * i + j * j);
-//             if (r0 > extent) continue; // ⛔️ пропустить точки за пределами круга
-
-//             const alpha = Math.max(0, 1 - (r0 / extent) ** 2); // плавный край
-
-//             // Поворот оси
-//             const xT = i * cosTilt - j * sinTilt;
-//             const yT = i * sinTilt + j * cosTilt;
-
-//             // Вращение
-//             const r = Math.sqrt(xT * xT + yT * yT);
-//             const theta = Math.atan2(yT, xT) + spinAngle;
-//             const xRot = r * Math.cos(theta);
-//             const yRot = r * Math.sin(theta);
-
-//             // Гиперскручивание
-//             const p = hyperTwistCircular(xRot, yRot, zoom, intensity);
-
-//             ctx.beginPath();
-//             ctx.arc(p.x, p.y, 0.03, 0, 2 * Math.PI);
-//             ctx.fillStyle = `rgba(255, 200, 255, 0.6)`;
-//             ctx.fill();
-//         }
-//     }
-
-//     ctx.restore();
-// }
-
-function computeHyperTwistGeodesicPath(R0, steps = 1000, dt = 0.01) {
-    const path = [];
-    let r = R0;
-    let theta = 0;
-    let ur = 0;
-    let ut = 1.0 / r; // начальная угловая скорость
-
-    for (let i = 0; i < steps; i++) {
-        const x = r * Math.cos(theta);
-        const y = r * Math.sin(theta);
-        path.push({ x, y });
-
-        // Производные метрики: приближённый вариант для g_{\theta\theta} = r^2(1 + \lambda / (1 + r)^2)
-        const lambda = 1.0;
-        const gtt = r * r * (1 + lambda / (1 + r) ** 2);
-        const dgtt_dr = 2 * r * (1 + lambda / (1 + r) ** 2) - (2 * r * r * lambda) / (1 + r) ** 3;
-
-        const Gamma_r_tt = -0.5 * dgtt_dr;
-        const Gamma_t_rt = 1 / r; // приближённо
-
-        const d2r = -Gamma_r_tt * ut * ut;
-        const d2t = (-2 * ur * ut) / r;
-
-        ur += d2r * dt;
-        ut += d2t * dt;
-        r += ur * dt;
-        theta += ut * dt;
-    }
-    return path;
-}
-
-function project3D(x, y, z, perspective = 4) {
-    const scale = 1 / (1 + z / perspective);
-    return { x: x * scale, y: y * scale };
-}
-
-function drawHyperTwistGrid(ctx, zoom, time, gridSize = 50, clipPath = null) {
-    const extent = 5;
-    const step = (extent * 2) / gridSize;
-
-    ctx.save();
-
-    if (clipPath) {
-        ctx.clip(clipPath);
-    }
-
-    const canvasWidth = ctx.canvas.width / window.devicePixelRatio;
-    const canvasHeight = ctx.canvas.height / window.devicePixelRatio;
-    const scale = Math.min(canvasWidth, canvasHeight) / (extent * 2);
-
-    ctx.translate(canvasWidth / 2, canvasHeight / 2);
-    ctx.scale(scale, -scale);
-
-    const transition = getTransition(zoom);
-    const minTilt = Math.PI / 12;
-    const maxTilt = Math.PI / 4;
-    const axialTilt = minTilt + (maxTilt - minTilt) * (1 - transition);
-
-    const intensity = 2.5 * Math.sin(time * 0.001);
-    const spinAngle = -(time * 0.0002) % (2 * Math.PI);
-
-    const cosTilt = Math.cos(axialTilt);
-    const sinTilt = Math.sin(axialTilt);
-    const baseDrop = -1.5;
-    const drop = baseDrop * (1 - transition);
-    const globalDrop = 2.0 * (1 - transition);
-
-    for (let i = -extent; i <= extent; i += step) {
-        for (let j = -extent; j <= extent; j += step) {
-            const r0 = Math.sqrt(i * i + j * j);
-            if (r0 > extent) continue;
-
-            const alpha = Math.max(0, 1 - (r0 / extent) ** 2);
-
-            let x3d = i * cosTilt - j * sinTilt;
-            let y3d = i * sinTilt + j * cosTilt;
-            let z3d = 0.3 * r0 ** 2 * (1 - transition) + drop + globalDrop;
-
-            const r = Math.sqrt(x3d * x3d + y3d * y3d);
-            const theta = Math.atan2(y3d, x3d) + spinAngle;
-            const xRot = r * Math.cos(theta);
-            const yRot = r * Math.sin(theta);
-
-            const depthScale = -0.5;
-            const p = hyperTwistCircular(xRot, yRot - z3d * depthScale, zoom, intensity);
-
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, 0.03, 0, 2 * Math.PI);
-            ctx.fillStyle = `rgba(255, 200, 255, ${0.8 * alpha})`;
-            ctx.fill();
-        }
-    }
-    if (transition < 0.5) {
-        const diskAlpha = 1 - transition * 2;
-        const diskRadius = 1.5;
-        const axialTilt = Math.PI / 4; // максимальный наклон
-        const perspective = 4;
-
-        const cosTilt = Math.cos(axialTilt);
-        const sinTilt = Math.sin(axialTilt);
-
-        const points = [];
-
-        for (let a = 0; a <= 360; a += 2) {
-            const θ = (a * Math.PI) / 180;
-            const x = Math.cos(θ) * diskRadius;
-            const y = Math.sin(θ) * diskRadius;
-            const z = 0;
-
-            // Поворот вокруг оси X (наклон тарелки от нас внутрь)
-            const y1 = y * cosTilt - z * sinTilt;
-            const z1 = y * sinTilt + z * cosTilt;
-
-            const proj = project3D(x, y1, z1, perspective);
-            points.push(proj);
-        }
-
-        ctx.beginPath();
-        ctx.moveTo(points[0].x, points[0].y);
-        for (let i = 1; i < points.length; i++) {
-            ctx.lineTo(points[i].x, points[i].y);
-        }
-        ctx.closePath();
-
-        ctx.fillStyle = `rgba(80, 160, 255, ${diskAlpha * 0.2})`;
-        ctx.fill();
-        ctx.strokeStyle = `rgba(255, 255, 255, ${diskAlpha * 0.3})`;
-        ctx.lineWidth = 0.05;
-        ctx.stroke();
-    }
-
-    ctx.restore();
 }
 
 export default SinkHole;

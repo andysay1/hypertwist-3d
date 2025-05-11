@@ -1,21 +1,55 @@
-import { useRef } from 'react';
+// Шаг 1: В App.jsx добавим overlay для отображения тензоров
+import { useRef, useState, useEffect } from 'react';
 import SinkHole from './components/SinkHole';
 import './App.css';
 import './index.css';
 
-// const PLANETS = [
-//     { name: 'Mercury', radius: 0.2 },
-//     { name: 'Venus', radius: 0.32 },
-//     { name: 'Earth', radius: 0.45 },
-//     { name: 'Mars', radius: 0.6 },
-//     { name: 'Jupiter', radius: 0.8 },
-//     { name: 'Saturn', radius: 1.05 },
-//     { name: 'Uranus', radius: 1.25 },
-//     { name: 'Neptune', radius: 1.45 },
-// ];
-
 function App() {
     const sinkRef = useRef();
+    const [tensorText, setTensorText] = useState('');
+
+    useEffect(() => {
+        function phi(r) {
+            return Math.exp(-r * r);
+        }
+
+        function phiP(r) {
+            return -2 * r * Math.exp(-r * r);
+        }
+
+        function Rrr(r) {
+            const φ = phi(r);
+            const dφ = phiP(r);
+            return -(dφ + φ / r);
+        }
+
+        function Grr(r) {
+            return 0.5 * Rrr(r);
+        }
+
+        function K(r) {
+            return Rrr(r) ** 2;
+        }
+
+        const rs = [0.3, 0.8, 1.2, 2.0];
+        let text = '';
+
+        rs.forEach((r) => {
+            const φ = phi(r).toFixed(5);
+            const dφ = phiP(r).toFixed(5);
+            const ricci = Rrr(r).toFixed(5);
+            const einstein = Grr(r).toFixed(5);
+            const k = K(r).toFixed(5);
+            text += `r = ${r.toFixed(2)}\n`;
+            text += `φ = ${φ}\n`;
+            text += `φ' = ${dφ}\n`;
+            text += `R_rr = ${ricci}\n`;
+            text += `G_rr = ${einstein}\n`;
+            text += `K = ${k}\n\n`;
+        });
+
+        setTensorText(text.trim());
+    }, []);
 
     const handleFocus = (index) => {
         if (sinkRef.current && sinkRef.current.focusOnPlanet) {
@@ -25,15 +59,14 @@ function App() {
 
     return (
         <div className='App'>
-            {/* <div className='absolute top-4 left-4 z-10 bg-black/70 text-white p-2 rounded'>
-                {PLANETS.map((p, i) => (
-                    <div key={i} className='cursor-pointer hover:text-yellow-300' onClick={() => handleFocus(i)}>
-                        {p.name}
-                    </div>
-                ))}
-            </div> */}
-            <div className='w-screen h-screen bg-black'>
+            <div className='w-screen h-screen bg-black relative'>
                 <SinkHole ref={sinkRef} className='w-full h-full' />
+                <div
+                    className='absolute top-0 left-4 bg-black/80 text-green-300 text-xs p-3 rounded whitespace-pre font-mono pointer-events-none'
+                    style={{ maxWidth: '300px' }}
+                >
+                    {tensorText}
+                </div>
             </div>
         </div>
     );
