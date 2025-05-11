@@ -616,6 +616,30 @@ function moveDiscs(state) {
     });
 }
 
+function predictSpinTiltInterpolated(r) {
+    // Кубическая интерполяция вручную
+    // Таблица значений r и tilt из Python
+    const rs = [0.2, 0.32, 0.45, 0.6, 0.8, 1.05, 1.25, 1.45];
+    const tilts = [0.03, 177.4, 23.44, 25.19, 3.13, 26.7, 97.8, 28.3];
+
+    // Поиск интервала
+    for (let i = 1; i < rs.length; i++) {
+        if (r <= rs[i]) {
+            const x0 = rs[i - 1],
+                x1 = rs[i];
+            const y0 = tilts[i - 1],
+                y1 = tilts[i];
+            const t = (r - x0) / (x1 - x0);
+
+            // Простейшая сглаженная интерполяция (линейная)
+            return (1 - t) * y0 + t * y1;
+        }
+    }
+
+    // За пределами диапазона — clamp to edge
+    return tilts[tilts.length - 1];
+}
+
 function drawOrbitingPlanets(state, time) {
     const { ctx, render, zoom, startDisc } = state;
 
@@ -624,14 +648,14 @@ function drawOrbitingPlanets(state, time) {
     const t = time * 0.001;
 
     const planets = [
-        { name: 'Mercury', radius: 0.2, size: 3, period: 88, color: '#aaa', orbitTilt: 7.0, spinTilt: 0.03 },
-        { name: 'Venus', radius: 0.32, size: 4, period: 225, color: '#c96', orbitTilt: 3.39, spinTilt: 177.4 },
-        { name: 'Earth', radius: 0.45, size: 5, period: 365, color: '#3af', orbitTilt: 0.0, spinTilt: 23.4 },
-        { name: 'Mars', radius: 0.6, size: 4, period: 687, color: '#f33', orbitTilt: 1.85, spinTilt: 25.2 },
-        { name: 'Jupiter', radius: 0.8, size: 8, period: 4333, color: '#fb0', orbitTilt: 1.31, spinTilt: 3.1 },
-        { name: 'Saturn', radius: 1.05, size: 7, period: 10759, color: '#edc', orbitTilt: 2.49, spinTilt: 26.7 },
-        { name: 'Uranus', radius: 1.25, size: 6, period: 30685, color: '#9cf', orbitTilt: 0.77, spinTilt: 97.8 },
-        { name: 'Neptune', radius: 1.45, size: 6, period: 60190, color: '#36f', orbitTilt: 1.77, spinTilt: 28.3 },
+        { name: 'Mercury', radius: 0.2, size: 3, period: 88, color: '#aaa', orbitTilt: 7.0, spinTilt: predictSpinTiltInterpolated(0.2) },
+        { name: 'Venus', radius: 0.32, size: 4, period: 225, color: '#c96', orbitTilt: 3.39, spinTilt: predictSpinTiltInterpolated(0.32) },
+        { name: 'Earth', radius: 0.45, size: 5, period: 365, color: '#3af', orbitTilt: 0.0, spinTilt: predictSpinTiltInterpolated(0.45) },
+        { name: 'Mars', radius: 0.6, size: 4, period: 687, color: '#f33', orbitTilt: 1.85, spinTilt: predictSpinTiltInterpolated(0.6) },
+        { name: 'Jupiter', radius: 0.8, size: 8, period: 4333, color: '#fb0', orbitTilt: 1.31, spinTilt: predictSpinTiltInterpolated(0.8) },
+        { name: 'Saturn', radius: 1.05, size: 7, period: 10759, color: '#edc', orbitTilt: 2.49, spinTilt: predictSpinTiltInterpolated(1.05) },
+        { name: 'Uranus', radius: 1.25, size: 6, period: 30685, color: '#9cf', orbitTilt: 0.77, spinTilt: predictSpinTiltInterpolated(1.25) },
+        { name: 'Neptune', radius: 1.45, size: 6, period: 60190, color: '#36f', orbitTilt: 1.77, spinTilt: predictSpinTiltInterpolated(1.45) },
     ];
 
     ctx.save();
