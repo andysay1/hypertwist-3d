@@ -624,14 +624,14 @@ function drawOrbitingPlanets(state, time) {
     const t = time * 0.001;
 
     const planets = [
-        { radius: 0.2, size: 3, period: 88, color: '#aaa' },
-        { radius: 0.32, size: 4, period: 225, color: '#c96' },
-        { radius: 0.45, size: 5, period: 365, color: '#3af' },
-        { radius: 0.6, size: 4, period: 687, color: '#f33' },
-        { radius: 0.8, size: 8, period: 4333, color: '#fb0' },
-        { radius: 1.05, size: 7, period: 10759, color: '#edc' },
-        { radius: 1.25, size: 6, period: 30685, color: '#9cf' },
-        { radius: 1.45, size: 6, period: 60190, color: '#36f' },
+        { name: 'Mercury', radius: 0.2, size: 3, period: 88, color: '#aaa', orbitTilt: 7.0, spinTilt: 0.03 },
+        { name: 'Venus', radius: 0.32, size: 4, period: 225, color: '#c96', orbitTilt: 3.39, spinTilt: 177.4 },
+        { name: 'Earth', radius: 0.45, size: 5, period: 365, color: '#3af', orbitTilt: 0.0, spinTilt: 23.4 },
+        { name: 'Mars', radius: 0.6, size: 4, period: 687, color: '#f33', orbitTilt: 1.85, spinTilt: 25.2 },
+        { name: 'Jupiter', radius: 0.8, size: 8, period: 4333, color: '#fb0', orbitTilt: 1.31, spinTilt: 3.1 },
+        { name: 'Saturn', radius: 1.05, size: 7, period: 10759, color: '#edc', orbitTilt: 2.49, spinTilt: 26.7 },
+        { name: 'Uranus', radius: 1.25, size: 6, period: 30685, color: '#9cf', orbitTilt: 0.77, spinTilt: 97.8 },
+        { name: 'Neptune', radius: 1.45, size: 6, period: 60190, color: '#36f', orbitTilt: 1.77, spinTilt: 28.3 },
     ];
 
     ctx.save();
@@ -639,7 +639,7 @@ function drawOrbitingPlanets(state, time) {
     const A = 3.5 + Math.sin(t * 0.1) * 0.5;
     const B = 2.2 + Math.cos(t * 0.07) * 0.3;
 
-    planets.forEach(({ radius, size, period, color }) => {
+    planets.forEach(({ name, radius, size, period, color, spinTilt }) => {
         const omega_orbit = (2 * Math.PI) / period;
         const angle = omega_orbit * t;
 
@@ -662,6 +662,25 @@ function drawOrbitingPlanets(state, time) {
         // Вращение по оси
         const omega_spin = A / Math.pow(1 + radius, B);
         const spinAngle = t * omega_spin;
+
+        // Показ стрелки оси вращения
+        const tiltRad = (spinTilt * Math.PI) / 180;
+        const tiltLength = size * 1.5;
+        const dx = tiltLength * Math.cos(tiltRad);
+        const dy = tiltLength * Math.sin(tiltRad);
+
+        // Подпись имени и наклона
+        ctx.fillStyle = 'white';
+        ctx.font = '10px sans-serif';
+        ctx.fillText(`${name}`, px + size + 6, py - 6);
+        ctx.fillText(`${spinTilt.toFixed(1)}°`, px + size + 6, py + 6);
+
+        ctx.beginPath();
+        ctx.moveTo(px, py);
+        ctx.lineTo(px + dx, py - dy);
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 1;
+        ctx.stroke();
 
         ctx.save();
         ctx.translate(px, py);
