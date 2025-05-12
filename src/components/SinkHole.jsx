@@ -35,6 +35,9 @@ const SinkHole = forwardRef((props, ref) => {
             drop: 1.5,
             perspective: 4,
             globalScale: 1.0,
+            twistStrength: 2, // начальная сила скручивания
+            twistPhase: 2, // начальный сдвиг вращения
+            twistAngle: 2,
         });
 
         const onWheel = (e) => {
@@ -70,7 +73,6 @@ const SinkHole = forwardRef((props, ref) => {
 
             setDiscs(state, rect);
             setLines(state, rect);
-            setParticles(state, rect);
         };
 
         window.addEventListener('resize', onResize);
@@ -115,21 +117,6 @@ function gradPhiField(x, y) {
     };
 }
 
-function initFlowParticle() {
-    return {
-        x: 0.01,
-        y: 0.0,
-        path: [],
-    };
-}
-function initReflectedFlowParticle() {
-    return {
-        x: 1.45,
-        y: 0.0,
-        path: [],
-    };
-}
-
 function getTimeColorByPhi(phi) {
     const t = Math.min(1, Math.max(0, phi)); // [0,1]
     const r = Math.round(255 * (1 - t)); // φ→0 → r=255 (красный)
@@ -138,10 +125,22 @@ function getTimeColorByPhi(phi) {
     return `rgba(${r},${g},${b},0.4)`; // прозрачный ореол
 }
 
-function stepFlowParticle(p, dt = 0.01) {
-    const grad = gradPhiField(p.x, p.y);
-    const vx = -grad.dx;
-    const vy = -grad.dy;
+function stepFallByMetric(p, dt = 0.01) {
+    const r = Math.sqrt(p.x * p.x + p.y * p.y);
+    if (r === 0) return p;
+
+    // Вычисляем производную от r * √g_rr(r)
+    const eps = 0.001;
+    const grr = g_rr(r);
+    const grr_p = g_rr(r + eps);
+    const grr_m = g_rr(r - eps);
+    const dgrr = (grr_p - grr_m) / (2 * eps);
+
+    const dMetricR = Math.sqrt(grr) + (r * dgrr) / (2 * Math.sqrt(grr));
+
+    const vx = -dMetricR * (p.x / r);
+    const vy = -dMetricR * (p.y / r);
+
     return {
         x: p.x + dt * vx,
         y: p.y + dt * vy,
@@ -176,7 +175,7 @@ function drawPath(ctx, path, state, color) {
 
     ctx.beginPath();
     path.forEach(([x, y], i) => {
-        const twisted = hyperTwistCircular(x, y, zoom);
+        const twisted = hyperTwistCircular(x, y, zoom, state.twistStrength, state.twistAngle);
         const px = cx + twisted.x * render.width * 0.2;
         const py = cy + twisted.y * render.height * 0.2;
 
@@ -295,42 +294,6 @@ function setLines(state, rect) {
     state.linesCtx = lctx;
 }
 
-function setParticles(state, rect) {
-    const { width, height } = rect;
-    state.particles = [];
-
-    const sw = 20;
-    const ew = 1000;
-    const h = height * 0.85;
-
-    state.particleArea = {
-        sw,
-        ew,
-        h,
-        sx: (width - sw) / 2,
-        ex: (width - ew) / 2,
-    };
-
-    for (let i = 0; i < 100; ++i) {
-        state.particles.push(initParticle(state, true));
-    }
-}
-
-function initParticle(state, start = false) {
-    const { sx, ex, sw, ew, h } = state.particleArea;
-    const x0 = sx + sw * Math.random();
-    const x1 = ex + ew * Math.random();
-    return {
-        sx: x0,
-        dx: x1 - x0,
-        x: x0,
-        y: start ? 0 : 0,
-        vy: 0.5 + Math.random(),
-        r: 0.5 + Math.random() * 4,
-        c: `rgba(255,255,255,${Math.random()})`,
-    };
-}
-
 function tweenDisc(disc, state) {
     const { startDisc: s, endDisc: e } = state;
     disc.x = tween(s.x, e.x, disc.p);
@@ -341,18 +304,20 @@ function tweenDisc(disc, state) {
 }
 
 function emitCoreSinkParticles(state) {
+    // Инициализация списка частиц, если они ещё не были созданы
     if (!state.coreSinkParticles) state.coreSinkParticles = [];
+    // Если текущие частицы не превышают 100, добавляем новые
     if (state.coreSinkParticles.length < 100) {
         for (let i = 0; i < 4; i++) {
             const angle = Math.random() * 2 * Math.PI;
             state.coreSinkParticles.push({
-                r: 2.5 + Math.random(),
+                r: 2.5 + Math.random(), // случайный радиус
                 θ: angle,
-                v: 0.01 + Math.random() * 0.005,
+                v: 0.01 + Math.random() * 0.005, // скорость падения
                 omega: 0.02 + Math.random() * 0.01,
-                alpha: 1.0,
+                alpha: 1.0, // начальная прозрачность
                 color: `hsla(${Math.random() * 360}, 100%, 70%, 1)`,
-                phase: 'descend',
+                phase: 'descend', // начальная фаза
             });
         }
     }
@@ -364,34 +329,76 @@ function drawCoreSinkParticles(ctx, state) {
     const cy = state.startDisc.y;
 
     state.coreSinkParticles.forEach((p) => {
+        // Фаза "descend" — частица падает в центр
         if (p.phase === 'descend') {
             p.r -= p.v;
             p.θ -= p.omega;
-            p.alpha -= 0.003;
+
+            // Моделируем падение по гравитационной метрике
+            const grr = g_rr(p.r);
+            const zDrop = Math.sqrt(grr) * render.height * 0.1; // вертикальное падение с учётом метрики
+
+            p.alpha -= 0.003; // плавное исчезновение
 
             const x = p.r * Math.cos(p.θ);
             const y = p.r * Math.sin(p.θ);
-            const twisted = hyperTwistCircular(x, y, zoom);
+            const twisted = hyperTwistCircular(x, y, zoom, state.twistStrength, state.twistAngle);
             const px = cx + twisted.x * render.width * 0.2;
             let py = cy + twisted.y * render.height * 0.2;
 
-            // Имитация падения вниз
-            const zDrop = (1 - p.r / 2.5) * render.height * 0.1;
-            py += zDrop;
+            py += zDrop; // добавляем падение по вертикали
 
             ctx.globalAlpha = p.alpha;
             ctx.fillStyle = p.color;
             ctx.beginPath();
             ctx.arc(px, py, 1.5, 0, 2 * Math.PI);
             ctx.fill();
+
+            // Когда частица достигает центра (или минимального радиуса), она переключается на фазу "impact"
+            if (p.r <= 0.1) {
+                p.phase = 'impact';
+                p.v *= -1; // частица меняет направление
+            }
+        }
+
+        // Фаза "impact" — столкновение с центром
+        if (p.phase === 'impact') {
+            p.alpha -= 0.01;
+            p.v *= 0.9; // замедление
+
+            // Когда частица становится полупрозрачной, она переключается на фазу "return"
+            if (p.alpha <= 0.3) {
+                p.phase = 'return';
+                p.v = 0.015 + Math.random() * 0.005; // увеличиваем скорость возврата
+            }
+        }
+
+        // Фаза "return" — частица возвращается к источнику (в центр)
+        if (p.phase === 'return') {
+            p.r -= p.v;
+            p.θ -= p.omega * 0.5;
+
+            // Когда частица возвращается в центр, она переключается на фазу "ascend" и начинает новый цикл
+            if (p.r <= 0.1) {
+                p.phase = 'ascend';
+                p.r = 0;
+                p.v = 0.015 + Math.random() * 0.005;
+                p.omega = 0.05 + Math.random() * 0.02;
+                p.alpha = 1.0;
+                p.color = `hsla(${Math.random() * 360}, 100%, 70%, 1)`;
+            }
         }
     });
 
     ctx.globalAlpha = 1.0;
 
-    // Удалить исчезнувшие
-    state.coreSinkParticles = state.coreSinkParticles.filter((p) => p.r > 0.05 && p.alpha > 0);
-    emitCoreSinkParticles(state);
+    // Удаляем исчезнувшие частицы
+    state.coreSinkParticles = state.coreSinkParticles.filter((p) => p.alpha > 0);
+
+    // Запускаем новую генерацию частиц, если все старые завершили свой цикл
+    if (state.coreSinkParticles.length < 100) {
+        emitCoreSinkParticles(state);
+    }
 }
 
 function emitCoreSpiralParticles(state) {
@@ -432,7 +439,7 @@ function drawCoreSpiralParticles(ctx, state) {
 
         const x = p.r * Math.cos(p.θ);
         const y = p.r * Math.sin(p.θ);
-        const twisted = hyperTwistCircular(x, y, zoom);
+        const twisted = hyperTwistCircular(x, y, zoom, state.twistStrength, state.twistAngle);
         const px = cx + twisted.x * render.width * 0.2;
         const py = cy + twisted.y * render.height * 0.2; // теперь центр — солнце
 
@@ -521,6 +528,10 @@ function drawUpwardStreamParticles(ctx, state) {
 }
 
 function tick(state) {
+    if (!state.twistPhase) state.twistPhase = 0;
+    state.twistPhase += 0.002; // скорость общего вращения
+    state.twistAngle = state.twistPhase;
+
     const { ctx, canvas, render } = state;
     if (!state.centerBursts) state.centerBursts = [];
 
@@ -535,16 +546,16 @@ function tick(state) {
 
     moveDiscs(state);
     // moveParticles(state);
-    emitUpwardStreamParticles(state);
-    drawUpwardStreamParticles(ctx, state);
+    // emitUpwardStreamParticles(state);
+    // drawUpwardStreamParticles(ctx, state);
 
-    emitCoreSinkParticles(state);
-    drawCoreSinkParticles(ctx, state);
+    // emitCoreSinkParticles(state);
+    // drawCoreSinkParticles(ctx, state);
 
-    emitCoreSpiralParticles(state);
-    drawCoreSpiralParticles(ctx, state);
-    drawDiscs(state);
-    drawLines(state);
+    // emitCoreSpiralParticles(state);
+    // drawCoreSpiralParticles(ctx, state);
+
+    drawDiscsAndLines(state, performance.now());
 
     drawOrbitalPlanes(state);
     drawOrbitingPlanets(state, performance.now());
@@ -567,6 +578,10 @@ function tick(state) {
 
     ctx.restore();
     state.raf = requestAnimationFrame(() => tick(state));
+}
+
+function det_g(r) {
+    return g_rr(r) * g_θθ(r);
 }
 
 function drawGrPlot(ctx, state) {
@@ -607,6 +622,32 @@ function drawGrPlot(ctx, state) {
     ctx.fillStyle = 'white';
     ctx.font = '12px sans-serif';
     ctx.fillText('g_rr(r)', x0 + 5, y0 + 15);
+
+    ctx.beginPath();
+    for (let i = 0; i <= 100; i++) {
+        const r = rMin + (rMax - rMin) * (i / 100);
+        const gθθ = g_θθ(r);
+        const px = x0 + ((r - rMin) / (rMax - rMin)) * W;
+        const py = y0 + H - ((gθθ - 0) / (1.2 - 0)) * H;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = 'orange';
+    ctx.stroke();
+    ctx.fillText('g_θθ(r)', x0 + 5, y0 + 30);
+
+    ctx.beginPath();
+    for (let i = 0; i <= 100; i++) {
+        const r = rMin + (rMax - rMin) * (i / 100);
+        const detg = Math.sqrt(Math.abs(det_g(r)));
+        const px = x0 + ((r - rMin) / (rMax - rMin)) * W;
+        const py = y0 + H - ((detg - 0) / (1.2 - 0)) * H;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = 'purple';
+    ctx.stroke();
+    ctx.fillText('√|det g|', x0 + 5, y0 + 45);
 }
 
 function moveDiscs(state) {
@@ -648,14 +689,14 @@ function drawOrbitingPlanets(state, time) {
     const t = time * 0.001;
 
     const planets = [
-        { name: 'Mercury', radius: 0.2, size: 3, period: 88, color: '#aaa', orbitTilt: 7.0, spinTilt: predictSpinTiltInterpolated(0.2) },
-        { name: 'Venus', radius: 0.32, size: 4, period: 225, color: '#c96', orbitTilt: 3.39, spinTilt: predictSpinTiltInterpolated(0.32) },
-        { name: 'Earth', radius: 0.45, size: 5, period: 365, color: '#3af', orbitTilt: 0.0, spinTilt: predictSpinTiltInterpolated(0.45) },
-        { name: 'Mars', radius: 0.6, size: 4, period: 687, color: '#f33', orbitTilt: 1.85, spinTilt: predictSpinTiltInterpolated(0.6) },
-        { name: 'Jupiter', radius: 0.8, size: 8, period: 4333, color: '#fb0', orbitTilt: 1.31, spinTilt: predictSpinTiltInterpolated(0.8) },
-        { name: 'Saturn', radius: 1.05, size: 7, period: 10759, color: '#edc', orbitTilt: 2.49, spinTilt: predictSpinTiltInterpolated(1.05) },
-        { name: 'Uranus', radius: 1.25, size: 6, period: 30685, color: '#9cf', orbitTilt: 0.77, spinTilt: predictSpinTiltInterpolated(1.25) },
-        { name: 'Neptune', radius: 1.45, size: 6, period: 60190, color: '#36f', orbitTilt: 1.77, spinTilt: predictSpinTiltInterpolated(1.45) },
+        { name: 'Mercury', radius: 0.2, size: 3, period: 88, color: '#aaa', spinTilt: predictSpinTiltInterpolated(0.2) },
+        { name: 'Venus', radius: 0.32, size: 4, period: 225, color: '#c96', spinTilt: predictSpinTiltInterpolated(0.32) },
+        { name: 'Earth', radius: 0.45, size: 5, period: 365, color: '#3af', spinTilt: predictSpinTiltInterpolated(0.45) },
+        { name: 'Mars', radius: 0.6, size: 4, period: 687, color: '#f33', spinTilt: predictSpinTiltInterpolated(0.6) },
+        { name: 'Jupiter', radius: 0.8, size: 8, period: 4333, color: '#fb0', spinTilt: predictSpinTiltInterpolated(0.8) },
+        { name: 'Saturn', radius: 1.05, size: 7, period: 10759, color: '#edc', spinTilt: predictSpinTiltInterpolated(1.05) },
+        { name: 'Uranus', radius: 1.25, size: 6, period: 30685, color: '#9cf', spinTilt: predictSpinTiltInterpolated(1.25) },
+        { name: 'Neptune', radius: 1.45, size: 6, period: 60190, color: '#36f', spinTilt: predictSpinTiltInterpolated(1.45) },
     ];
 
     ctx.save();
@@ -663,37 +704,63 @@ function drawOrbitingPlanets(state, time) {
     const A = 3.5 + Math.sin(t * 0.1) * 0.5;
     const B = 2.2 + Math.cos(t * 0.07) * 0.3;
 
+    // Солнце
+    const pulse = 2 + Math.sin(t * 3) * 1.5;
+    const baseRadius = 10 + pulse;
+
+    // Центр (r = 0), поэтому подъём по g_rr(0)
+    const zLiftSun = 0 * Math.sqrt(g_rr(0)) * render.height * 0.08;
+    const sunX = cx;
+    const sunY = cy - render.height * 0.01; // поднять на 10% экрана вверх
+
+    // Анимация смещения (вращение свечения)
+    const spin = (t * 0.1) % (2 * Math.PI);
+    const xOffset = Math.cos(spin) * baseRadius * 0.2;
+    const yOffset = Math.sin(spin) * baseRadius * 0.2;
+
+    const gradient = ctx.createRadialGradient(sunX + xOffset, sunY + yOffset, baseRadius * 0.3, sunX + xOffset, sunY + yOffset, baseRadius);
+
+    gradient.addColorStop(0, 'rgba(255, 255, 100, 1)');
+    gradient.addColorStop(0.5, 'rgba(255, 180, 0, 0.8)');
+    gradient.addColorStop(1, 'rgba(255, 100, 0, 0)');
+
+    ctx.beginPath();
+    ctx.arc(sunX + xOffset, sunY + yOffset, baseRadius, 0, 2 * Math.PI);
+    ctx.fillStyle = gradient;
+    ctx.shadowColor = 'rgba(255, 200, 100, 0.5)';
+    ctx.shadowBlur = 30;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
     planets.forEach(({ name, radius, size, period, color, spinTilt }) => {
         const omega_orbit = (2 * Math.PI) / period;
         const angle = omega_orbit * t;
 
-        const rawX = radius * Math.cos(angle);
-        const rawY = radius * Math.sin(angle);
-        const twisted = hyperTwistCircular(rawX, rawY, zoom);
+        const scaleθ = (3 * Math.sqrt(g_θθ(radius))) / radius;
+        const rawX = radius * Math.cos(angle) * scaleθ;
+        const rawY = radius * Math.sin(angle) * scaleθ;
+        const twisted = hyperTwistCircular(rawX, rawY, zoom, state.twistStrength, state.twistAngle);
         const px = cx + twisted.x * render.width * 0.2;
-        const py = cy + twisted.y * render.height * 0.2;
 
-        // φ(r) визуализация времени
+        const zLift = radius * Math.sqrt(g_rr(radius)) * render.height * 0.08;
+        const py = cy - zLift + twisted.y * render.height * 0.2;
+
         const rPlan = Math.sqrt(rawX ** 2 + rawY ** 2);
         const phi = Math.exp(-(rPlan ** 2));
 
-        // Цветовая аура времени
         ctx.beginPath();
         ctx.arc(px, py, size + 5, 0, 2 * Math.PI);
         ctx.fillStyle = getTimeColorByPhi(phi);
         ctx.fill();
 
-        // Вращение по оси
         const omega_spin = A / Math.pow(1 + radius, B);
         const spinAngle = t * omega_spin;
 
-        // Показ стрелки оси вращения
         const tiltRad = (spinTilt * Math.PI) / 180;
         const tiltLength = size * 1.5;
         const dx = tiltLength * Math.cos(tiltRad);
         const dy = tiltLength * Math.sin(tiltRad);
 
-        // Подпись имени и наклона
         ctx.fillStyle = 'white';
         ctx.font = '10px sans-serif';
         ctx.fillText(`${name}`, px + size + 6, py - 6);
@@ -719,59 +786,7 @@ function drawOrbitingPlanets(state, time) {
         ctx.restore();
     });
 
-    // Солнце
-    const pulse = 2 + Math.sin(t * 3) * 1.5;
-    const baseRadius = 10 + pulse;
-    const gradient = ctx.createRadialGradient(cx, cy, baseRadius * 0.3, cx, cy, baseRadius);
-
-    const spin = (t * 0.1) % (2 * Math.PI);
-    const xOffset = Math.cos(spin) * baseRadius * 0.2;
-    const yOffset = Math.sin(spin) * baseRadius * 0.2;
-
-    gradient.addColorStop(0, 'rgba(255, 255, 100, 1)');
-    gradient.addColorStop(0.5, 'rgba(255, 180, 0, 0.8)');
-    gradient.addColorStop(1, 'rgba(255, 100, 0, 0)');
-
-    ctx.beginPath();
-    ctx.arc(cx + xOffset, cy + yOffset, baseRadius, 0, 2 * Math.PI);
-    ctx.fillStyle = gradient;
-    ctx.shadowColor = 'rgba(255, 200, 100, 0.5)';
-    ctx.shadowBlur = 30;
-    ctx.fill();
-    ctx.shadowBlur = 0;
-
     ctx.restore();
-}
-
-function drawDiscs(state) {
-    const { ctx, discs, clip } = state;
-    ctx.strokeStyle = '#444';
-    ctx.lineWidth = 2;
-    const maxTwist = Math.PI / 2;
-
-    const o = state.startDisc;
-    ctx.beginPath();
-    ctx.ellipse(o.x, o.y, o.w, o.h, 0, 0, Math.PI * 2);
-    ctx.stroke();
-
-    discs.forEach((d, i) => {
-        if (i % 5) return;
-        const useClip = d.w < clip.disc.w - 5;
-        if (useClip) ctx.save(), ctx.clip(clip.path);
-
-        const normalizedY = (d.y - state.startDisc.y) / (state.endDisc.y - state.startDisc.y);
-        const angle = maxTwist * Math.pow(normalizedY, 2);
-
-        ctx.save();
-        ctx.translate(d.x, d.y);
-        ctx.rotate(angle);
-        ctx.beginPath();
-        ctx.ellipse(0, 0, d.w, d.h, 0, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
-
-        if (useClip) ctx.restore();
-    });
 }
 
 function drawOrbitalPlanes(state) {
@@ -798,15 +813,17 @@ function drawOrbitalPlanes(state) {
         const steps = 360;
         for (let a = 0; a <= steps; a += 4) {
             const θ = (a * Math.PI) / 180;
-            const x = radius * Math.cos(θ);
-            const y = radius * Math.sin(θ);
+            const scaleθ = (3 * Math.sqrt(g_θθ(radius))) / radius;
+            const x = radius * Math.cos(θ) * scaleθ;
+            const y = radius * Math.sin(θ) * scaleθ;
 
-            // Пространственная трансформация
-            const rawX = x;
-            const rawY = y;
-            const twisted = hyperTwistCircular(rawX, rawY, zoom);
+            const twisted = hyperTwistCircular(x, y, zoom, state.twistStrength, state.twistAngle);
             const px = cx + twisted.x * render.width * 0.2;
-            const py = cy + twisted.y * render.height * 0.2;
+
+            // Добавим подъём орбит над воронкой
+            const zLift = radius * Math.sqrt(g_rr(radius)) * render.height * 0.08;
+            const py = cy - zLift + twisted.y * render.height * 0.2;
+
             points.push({ x: px, y: py });
         }
 
@@ -827,14 +844,87 @@ function drawOrbitalPlanes(state) {
     ctx.restore();
 }
 
-function drawLines(state) {
-    const { ctx, linesCanvas, render } = state;
-    const extra = 400; // должен совпадать
-    ctx.drawImage(linesCanvas, 0, 0, linesCanvas.width, linesCanvas.height, -extra / 2, -extra / 2, render.width + extra, render.height + extra);
+function drawDiscsAndLines(state, time) {
+    const { ctx, startDisc, render, zoom, globalScale, twistStrength } = state;
+    const cx = startDisc.x;
+    const cy = startDisc.y;
+
+    const t = time * 0.001;
+    const zoomScale = getTransition(zoom);
+    const rMax = 1.5 + 13.0 * globalScale * (1 - zoomScale);
+
+    const stepsTheta = 100;
+    const totalDiscs = 80;
+    const totalLines = 60;
+
+    ctx.lineWidth = 0.5;
+
+    // --- Радиальные линии строго по гиперскручиванию ---
+    ctx.strokeStyle = '#555';
+    ctx.globalAlpha = 0.4;
+
+    for (let i = 0; i < totalLines; i++) {
+        const θ0 = (i / totalLines) * 2 * Math.PI;
+
+        ctx.beginPath();
+        for (let j = 0; j <= totalDiscs; j++) {
+            const r = (j / totalDiscs) * rMax;
+            const x = r * Math.cos(θ0);
+            const y = r * Math.sin(θ0);
+
+            const twisted = hyperTwistCircular(x, y, zoom, state.twistStrength, state.twistAngle);
+            const px = cx + twisted.x * render.width * 0.2;
+
+            const liftFactor = 0.08 * Math.exp(-r * 1.5); // быстро убывает
+            const zLift = r * Math.sqrt(g_rr(r)) * render.height * liftFactor;
+            const py = cy - zLift + twisted.y * render.height * 0.2;
+
+            if (j === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+    }
+
+    // --- Концентрические окружности строго по g_θθ ---
+    ctx.strokeStyle = '#333';
+    ctx.globalAlpha = 0.6;
+
+    for (let j = 0; j < totalDiscs; j++) {
+        const r = (j / totalDiscs) * rMax;
+
+        ctx.beginPath();
+        for (let i = 0; i <= stepsTheta; i++) {
+            const θ = (i / stepsTheta) * 2 * Math.PI;
+            const x = r * Math.cos(θ);
+            const y = r * Math.sin(θ);
+
+            const twisted = hyperTwistCircular(x, y, zoom, state.twistStrength, state.twistAngle);
+            const px = cx + twisted.x * render.width * 0.2;
+
+            const zLift = r * Math.sqrt(g_rr(r)) * render.height * 0.08;
+            const py = cy - zLift + twisted.y * render.height * 0.2;
+
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+    }
+
+    ctx.globalAlpha = 1.0;
+}
+
+function project3D(x, y, z, perspective = 4) {
+    const scale = 1 / (1 + z / perspective);
+    return {
+        x: x * scale,
+        y: y * scale,
+    };
 }
 
 function getTransition(zoom, min = 0.05, max = 5.0) {
-    return (max - zoom) / (max - min);
+    const t = (max - zoom) / (max - min);
+    return Math.max(0, Math.min(1, t));
 }
 
 function g_rθ(r) {
@@ -845,16 +935,18 @@ function g_θθ(r) {
     return (r * r) / Math.pow(1 + r, 2);
 }
 
-function hyperTwistCircular(x, y, zoom, intensity = 2.5) {
+function hyperTwistCircular(x, y, zoom, intensity = 2.5, twistPhase = 0) {
     const t = getTransition(zoom);
     const r = Math.sqrt(x * x + y * y);
     const theta = Math.atan2(y, x);
 
-    // скручивание по g_{rθ}(r)
-    const twist = g_rθ(r) * intensity;
+    const twistLocal = g_rθ(r) * intensity;
+    const twistGlobal = twistPhase * Math.exp(-r * 1.5);
 
-    const thetaNew = theta + t * twist;
-    const rNew = (1 - t) * r + t * Math.tanh(r);
+    const thetaNew = theta + t * (twistLocal + twistGlobal);
+
+    const rMetric = r * Math.sqrt(g_rr(r));
+    const rNew = (1 - t) * r + t * rMetric;
 
     return {
         x: rNew * Math.cos(thetaNew),
