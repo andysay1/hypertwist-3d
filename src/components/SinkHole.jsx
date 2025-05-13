@@ -18,6 +18,7 @@ const SinkHole = forwardRef((props, ref) => {
     useEffect(() => {
         const canvas = canvasRef.current;
         const ctx = canvas.getContext('2d');
+
         const state = (stateRef.current = {
             canvas,
             ctx,
@@ -38,6 +39,20 @@ const SinkHole = forwardRef((props, ref) => {
             twistStrength: 2, // начальная сила скручивания
             twistPhase: 2, // начальный сдвиг вращения
             twistAngle: 2,
+            modulationHistory: [],
+
+            starfield: Array.from({ length: 300 }, () => ({
+                x: Math.random(),
+                y: Math.random(),
+                size: 0.5 + Math.random() * 1.5,
+                brightness: 0.5 + Math.random() * 0.5,
+                flickerSpeed: 0.5 + Math.random() * 1.5,
+            })),
+            photons: Array.from({ length: 15 }, (_, i) => ({
+                x: -1.5, // старт слева
+                y: -0.7 + i * 0.1, // разброс по вертикали
+                path: [],
+            })),
         });
 
         const onWheel = (e) => {
@@ -90,6 +105,78 @@ const SinkHole = forwardRef((props, ref) => {
 
     return <canvas ref={canvasRef} className={props.className} style={{ display: 'block', width: '100%', height: '100%' }} />;
 });
+
+function stepPhotonGeodesic(p, dt = 0.01) {
+    const r = Math.sqrt(p.x * p.x + p.y * p.y);
+    const eps = 0.001;
+    const grr = g_rr(r);
+    const grr_p = g_rr(r + eps);
+    const grr_m = g_rr(r - eps);
+    const dgrr = (grr_p - grr_m) / (2 * eps);
+
+    const dMetricR = Math.sqrt(grr) + (r * dgrr) / (2 * Math.sqrt(grr));
+
+    // Направление света — вправо по x, y — отклоняется
+    const vx = 1.0;
+    const vy = -dMetricR * (p.y / r); // градиент вверх/вниз
+
+    return {
+        x: p.x + dt * vx,
+        y: p.y + dt * vy,
+        path: [...p.path, [p.x, p.y]],
+    };
+}
+
+function drawPhotons(ctx, state) {
+    const { render, zoom, startDisc } = state;
+    const cx = startDisc.x;
+    const cy = startDisc.y;
+
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,0,0.5)';
+    ctx.lineWidth = 1;
+
+    state.photons.forEach((p) => {
+        const path = p.path.map(([x, y]) => {
+            const twist = hyperTwistCircular(x, y, zoom, state.twistStrength, state.twistAngle);
+            return [cx + twist.x * render.width * 0.2, cy + twist.y * render.height * 0.2];
+        });
+
+        ctx.beginPath();
+        path.forEach(([px, py], i) => {
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+        });
+        ctx.stroke();
+    });
+
+    ctx.restore();
+}
+
+function drawRadialLightBeams(ctx, state) {
+    const { startDisc, render } = state;
+    const cx = startDisc.x;
+    const cy = startDisc.y;
+
+    ctx.save();
+    ctx.lineWidth = 0.8;
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+
+    const count = 60;
+    for (let i = 0; i < count; i++) {
+        const angle = (i / count) * 2 * Math.PI;
+        const rMax = Math.max(render.width, render.height);
+        const x = cx + Math.cos(angle) * rMax;
+        const y = cy + Math.sin(angle) * rMax;
+
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+    }
+
+    ctx.restore();
+}
 
 /* ======================================================================== */
 /*                               helpers                                    */
@@ -322,163 +409,6 @@ function emitCoreSinkParticles(state) {
         }
     }
 }
-
-function drawCoreSinkParticles(ctx, state) {
-    const { render, zoom } = state;
-    const cx = state.startDisc.x;
-    const cy = state.startDisc.y;
-
-    state.coreSinkParticles.forEach((p) => {
-        // Фаза "descend" — частица падает в центр
-        if (p.phase === 'descend') {
-            p.r -= p.v;
-            p.θ -= p.omega;
-
-            // Моделируем падение по гравитационной метрике
-            const grr = g_rr(p.r);
-            const zDrop = Math.sqrt(grr) * render.height * 0.1; // вертикальное падение с учётом метрики
-
-            p.alpha -= 0.003; // плавное исчезновение
-
-            const x = p.r * Math.cos(p.θ);
-            const y = p.r * Math.sin(p.θ);
-            const twisted = hyperTwistCircular(x, y, zoom, state.twistStrength, state.twistAngle);
-            const px = cx + twisted.x * render.width * 0.2;
-            let py = cy + twisted.y * render.height * 0.2;
-
-            py += zDrop; // добавляем падение по вертикали
-
-            ctx.globalAlpha = p.alpha;
-            ctx.fillStyle = p.color;
-            ctx.beginPath();
-            ctx.arc(px, py, 1.5, 0, 2 * Math.PI);
-            ctx.fill();
-
-            // Когда частица достигает центра (или минимального радиуса), она переключается на фазу "impact"
-            if (p.r <= 0.1) {
-                p.phase = 'impact';
-                p.v *= -1; // частица меняет направление
-            }
-        }
-
-        // Фаза "impact" — столкновение с центром
-        if (p.phase === 'impact') {
-            p.alpha -= 0.01;
-            p.v *= 0.9; // замедление
-
-            // Когда частица становится полупрозрачной, она переключается на фазу "return"
-            if (p.alpha <= 0.3) {
-                p.phase = 'return';
-                p.v = 0.015 + Math.random() * 0.005; // увеличиваем скорость возврата
-            }
-        }
-
-        // Фаза "return" — частица возвращается к источнику (в центр)
-        if (p.phase === 'return') {
-            p.r -= p.v;
-            p.θ -= p.omega * 0.5;
-
-            // Когда частица возвращается в центр, она переключается на фазу "ascend" и начинает новый цикл
-            if (p.r <= 0.1) {
-                p.phase = 'ascend';
-                p.r = 0;
-                p.v = 0.015 + Math.random() * 0.005;
-                p.omega = 0.05 + Math.random() * 0.02;
-                p.alpha = 1.0;
-                p.color = `hsla(${Math.random() * 360}, 100%, 70%, 1)`;
-            }
-        }
-    });
-
-    ctx.globalAlpha = 1.0;
-
-    // Удаляем исчезнувшие частицы
-    state.coreSinkParticles = state.coreSinkParticles.filter((p) => p.alpha > 0);
-
-    // Запускаем новую генерацию частиц, если все старые завершили свой цикл
-    if (state.coreSinkParticles.length < 100) {
-        emitCoreSinkParticles(state);
-    }
-}
-
-function emitCoreSpiralParticles(state) {
-    if (!state.coreParticles) state.coreParticles = [];
-    if (state.coreParticles.length < 200) {
-        for (let i = 0; i < 3; i++) {
-            state.coreParticles.push({
-                r: 0,
-                θ: Math.random() * Math.PI * 2,
-                v: 0.015 + Math.random() * 0.005,
-                omega: 0.05 + Math.random() * 0.02,
-                alpha: 1.0,
-                phase: 'ascend',
-                targetY: 2.0,
-                color: `hsla(${Math.random() * 360}, 100%, 70%, 1)`,
-            });
-        }
-    }
-}
-
-function drawCoreSpiralParticles(ctx, state) {
-    const { render, zoom } = state;
-    const cx = state.startDisc.x;
-    const cy = state.startDisc.y; // 🌞 центр солнца — источник
-
-    state.coreParticles.forEach((p) => {
-        if (p.phase === 'ascend' && p.r >= p.targetY) {
-            p.phase = 'explode';
-            p.v = 0.02;
-            p.omega *= 2;
-        } else if (p.phase === 'explode' && p.r >= p.targetY + 1.0) {
-            p.phase = 'collapse';
-            p.v *= -1;
-        }
-
-        p.r += p.v;
-        p.θ += p.omega;
-
-        const x = p.r * Math.cos(p.θ);
-        const y = p.r * Math.sin(p.θ);
-        const twisted = hyperTwistCircular(x, y, zoom, state.twistStrength, state.twistAngle);
-        const px = cx + twisted.x * render.width * 0.2;
-        const py = cy + twisted.y * render.height * 0.2; // теперь центр — солнце
-
-        ctx.globalAlpha = p.alpha;
-        ctx.fillStyle = p.color;
-        ctx.beginPath();
-        ctx.arc(px, py, 2, 0, 2 * Math.PI);
-        ctx.fill();
-
-        if (p.phase === 'collapse') {
-            p.alpha -= 0.01;
-            if (p.alpha <= 0.3) {
-                p.phase = 'return';
-                p.v = 0.015 + Math.random() * 0.005;
-            }
-        } else if (p.phase === 'explode') {
-            p.alpha -= 0.004;
-        } else {
-            p.alpha -= 0.002;
-        }
-
-        if (p.phase === 'return') {
-            p.r -= p.v;
-            p.θ -= p.omega * 0.5;
-            if (p.r <= 0.1) {
-                p.phase = 'ascend';
-                p.r = 0;
-                p.v = 0.015 + Math.random() * 0.005;
-                p.omega = 0.05 + Math.random() * 0.02;
-                p.alpha = 1.0;
-                p.color = `hsla(${Math.random() * 360}, 100%, 70%, 1)`;
-            }
-        }
-    });
-
-    ctx.globalAlpha = 1.0;
-    state.coreParticles = state.coreParticles.filter((p) => p.alpha > 0);
-}
-
 function emitUpwardStreamParticles(state) {
     if (!state.upwardStream) state.upwardStream = [];
 
@@ -502,7 +432,7 @@ function emitUpwardStreamParticles(state) {
 function drawUpwardStreamParticles(ctx, state) {
     const { render, endDisc, startDisc } = state;
     const cx = endDisc.x;
-    const cy = endDisc.y;
+    const cy = 395;
     const targetY = startDisc.y;
 
     state.upwardStream.forEach((p) => {
@@ -523,14 +453,208 @@ function drawUpwardStreamParticles(ctx, state) {
         ctx.restore();
     });
 
-    state.upwardStream = state.upwardStream.filter((p) => p.alpha > 0 && cy - p.y > targetY - 20);
+    state.upwardStream = state.upwardStream.filter((p) => p.alpha > 0 && cy - p.y > targetY);
     emitUpwardStreamParticles(state);
+}
+
+function emitResonatorParticles(state) {
+    if (!state.resonanceParticles) state.resonanceParticles = [];
+    if (state.resonanceParticles.length < 100) {
+        // сниженное количество
+        for (let i = 0; i < 2; i++) {
+            state.resonanceParticles.push({
+                r: Math.random(),
+                θ: Math.random() * 2 * Math.PI,
+                v: 0.015 + Math.random() * 0.005,
+                omega: 0.03 + Math.random() * 0.015,
+                alpha: 1.0,
+                color: `hsla(${Math.random() * 360}, 100%, 70%, 1)`,
+            });
+        }
+    }
+}
+
+function drawResonatorParticles(ctx, state) {
+    if (!state.resonanceParticles) return;
+
+    const { render, zoom } = state;
+    const cx = state.startDisc.x;
+    const cy = state.startDisc.y;
+
+    state.resonanceParticles.forEach((p) => {
+        // Обновляем координаты
+        p.r += p.v;
+        p.θ += p.omega;
+
+        // Переход в фазу "escape"
+        if (p.phase !== 'escape' && p.r >= 111.5) {
+            p.phase = 'escape';
+            p.v = 0.02 + Math.random() * 0.01;
+        }
+
+        // Отражение только если НЕ escape
+        if (p.phase !== 'escape' && p.r <= 0.05) {
+            p.v *= -1;
+        }
+
+        const x = p.r * Math.cos(p.θ);
+        const y = p.r * Math.sin(p.θ);
+        const twisted = hyperTwistCircular(x, y, zoom, state.twistStrength, state.twistAngle);
+        const px = cx + twisted.x * render.width * 0.2;
+        const rReference = 0.45; // уровень Земли
+        const zLiftReference = rReference * Math.sqrt(g_rr(rReference)) * render.height * 0.08;
+        const zLift = zLiftReference;
+        const py = cy - zLift + twisted.y * render.height * 0.2;
+
+        ctx.globalAlpha = p.alpha;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(px, py, 1.2, 0, 2 * Math.PI);
+        ctx.fill();
+    });
+
+    ctx.globalAlpha = 1.0;
+    state.resonanceParticles = state.resonanceParticles.filter((p) => {
+        // Быстрее исчезают те, что убегают
+        p.alpha -= p.phase === 'escape' ? 0.002 : 0.003;
+        return p.alpha > 0;
+    });
+
+    emitResonatorParticles(state);
+}
+
+function drawFourierSpectrum(ctx, state) {
+    const { modulationHistory, render } = state;
+    if (!modulationHistory || modulationHistory.length < 32) return;
+
+    const W = 150;
+    const H = 80;
+    const x0 = render.width - W - 10;
+    const y0 = render.height - H - 20;
+
+    const N = modulationHistory.length;
+    const re = new Array(N).fill(0);
+    const im = new Array(N).fill(0);
+    const spectrum = [];
+
+    for (let k = 0; k < N / 2; k++) {
+        for (let n = 0; n < N; n++) {
+            const angle = (2 * Math.PI * k * n) / N;
+            re[k] += modulationHistory[n] * Math.cos(angle);
+            im[k] -= modulationHistory[n] * Math.sin(angle);
+        }
+        const mag = Math.sqrt(re[k] ** 2 + im[k] ** 2);
+        spectrum.push(mag);
+    }
+
+    const max = Math.max(...spectrum);
+    const peakIndex = spectrum.indexOf(max);
+
+    ctx.save();
+    ctx.strokeStyle = 'aqua';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+
+    for (let i = 0; i < spectrum.length; i++) {
+        const px = x0 + (i / spectrum.length) * W;
+        const py = y0 + H - (spectrum[i] / max) * H;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // сетка по оси Y
+    ctx.strokeStyle = '#444';
+    ctx.lineWidth = 0.5;
+    for (let j = 0; j <= 4; j++) {
+        const y = y0 + (j / 4) * H;
+        ctx.beginPath();
+        ctx.moveTo(x0, y);
+        ctx.lineTo(x0 + W, y);
+        ctx.stroke();
+    }
+
+    // выделим пиковую частоту
+    const peakX = x0 + (peakIndex / spectrum.length) * W;
+    ctx.strokeStyle = 'red';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(peakX, y0);
+    ctx.lineTo(peakX, y0 + H);
+    ctx.stroke();
+
+    ctx.fillStyle = 'white';
+    ctx.font = '10px sans-serif';
+    ctx.fillText('Freq', x0 + W / 2 - 10, y0 + H + 12);
+    ctx.fillText('Amp', x0 - 25, y0 + 10);
+    ctx.fillText(`Peak: ${peakIndex}`, x0 + 5, y0 + 12);
+
+    ctx.restore();
+}
+
+function emitCentralSpiralParticles(state) {
+    if (!state.centralSpiral) state.centralSpiral = [];
+
+    const MAX = 80;
+    const BATCH = 4;
+
+    if (state.centralSpiral.length < MAX) {
+        for (let i = 0; i < BATCH; i++) {
+            state.centralSpiral.push({
+                r: 0.01 + Math.random() * 0.1,
+                θ: Math.random() * Math.PI * 2,
+                v: 0.008 + Math.random() * 0.005,
+                omega: 0.1 + Math.random() * 0.05,
+                alpha: 1.0,
+                color: `hsla(${180 + Math.random() * 60}, 100%, 75%, 1)`,
+            });
+        }
+    }
+}
+
+function drawCentralSpiralParticles(ctx, state) {
+    const { render, zoom, startDisc } = state;
+    const cx = startDisc.x;
+    const cy = startDisc.y;
+
+    if (!state.centralSpiral) return;
+
+    state.centralSpiral.forEach((p) => {
+        p.r += p.v;
+        p.θ += p.omega;
+        p.alpha -= 0.004;
+
+        const x = p.r * Math.cos(p.θ);
+        const y = -p.r * 0.5; // строго вверх
+        const z = p.r * 0.4; // эффект вертикального вытягивания
+
+        const twist = hyperTwistCircular(x, y, zoom, state.twistStrength, state.twistAngle);
+        const px = cx + twist.x * render.width * 0.2;
+        const py = cy + twist.y * render.height * 0.2 - z * render.height * 0.05;
+
+        ctx.globalAlpha = p.alpha;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(px, py, 1.5, 0, 2 * Math.PI);
+        ctx.fill();
+    });
+
+    state.centralSpiral = state.centralSpiral.filter((p) => p.alpha > 0);
+    ctx.globalAlpha = 1.0;
+    emitCentralSpiralParticles(state);
 }
 
 function tick(state) {
     if (!state.twistPhase) state.twistPhase = 0;
     state.twistPhase += 0.002; // скорость общего вращения
     state.twistAngle = state.twistPhase;
+
+    const avgResonanceRadius = (state.resonanceParticles?.reduce((sum, p) => sum + p.r, 0) ?? 0) / (state.resonanceParticles?.length || 1);
+
+    state.modulationHistory.push(avgResonanceRadius);
+    if (state.modulationHistory.length > 1024) {
+        state.modulationHistory.shift(); // ограничим длину
+    }
 
     const { ctx, canvas, render } = state;
     if (!state.centerBursts) state.centerBursts = [];
@@ -546,16 +670,25 @@ function tick(state) {
 
     moveDiscs(state);
     // moveParticles(state);
-    // emitUpwardStreamParticles(state);
-    // drawUpwardStreamParticles(ctx, state);
+    emitUpwardStreamParticles(state);
+    drawUpwardStreamParticles(ctx, state);
+    // state.photons = state.photons.map((p) => stepPhotonGeodesic(p));
+    // drawPhotons(ctx, state);
+    // drawCentralSource(ctx, state);
+    // drawCentralSpiralParticles(ctx, state);
 
     // emitCoreSinkParticles(state);
     // drawCoreSinkParticles(ctx, state);
-
+    drawResonatorParticles(ctx, state);
+    emitResonatorParticles(state);
     // emitCoreSpiralParticles(state);
     // drawCoreSpiralParticles(ctx, state);
+    drawFourierSpectrum(ctx, state);
+    // drawCentralSource(ctx, state);
 
     drawDiscsAndLines(state, performance.now());
+    drawStarfield(ctx, state, performance.now());
+    drawRadialLightBeams(ctx, state);
 
     drawOrbitalPlanes(state);
     drawOrbitingPlanets(state, performance.now());
@@ -578,6 +711,25 @@ function tick(state) {
 
     ctx.restore();
     state.raf = requestAnimationFrame(() => tick(state));
+}
+
+function drawStarfield(ctx, state, t) {
+    const { render, starfield, globalScale } = state;
+
+    ctx.save();
+    ctx.globalAlpha = 0.6;
+    starfield.forEach((star) => {
+        const flicker = 0.7 + 0.3 * Math.sin(t * 0.001 * star.flickerSpeed);
+        const px = star.x * render.width;
+        const py = star.y * render.height;
+        const size = star.size * globalScale;
+
+        ctx.beginPath();
+        ctx.arc(px, py, size, 0, 2 * Math.PI);
+        ctx.fillStyle = `rgba(255,255,255,${flicker * star.brightness})`;
+        ctx.fill();
+    });
+    ctx.restore();
 }
 
 function det_g(r) {
@@ -709,17 +861,18 @@ function drawOrbitingPlanets(state, time) {
     const baseRadius = 10 + pulse;
 
     // Центр (r = 0), поэтому подъём по g_rr(0)
-    const zLiftSun = 0 * Math.sqrt(g_rr(0)) * render.height * 0.08;
+    const rEarth = 0.45;
+    const zLiftSun = rEarth * Math.sqrt(g_rr(rEarth)) * render.height * 0.08;
     const sunX = cx;
-    const sunY = cy - render.height * 0.01; // поднять на 10% экрана вверх
+    const sunY = cy - zLiftSun;
 
     // Анимация смещения (вращение свечения)
     const spin = (t * 0.1) % (2 * Math.PI);
     const xOffset = Math.cos(spin) * baseRadius * 0.2;
     const yOffset = Math.sin(spin) * baseRadius * 0.2;
 
-    const gradient = ctx.createRadialGradient(sunX + xOffset, sunY + yOffset, baseRadius * 0.3, sunX + xOffset, sunY + yOffset, baseRadius);
-
+    // убрать вращение свечения
+    const gradient = ctx.createRadialGradient(sunX, sunY, baseRadius * 0.3, sunX, sunY, baseRadius);
     gradient.addColorStop(0, 'rgba(255, 255, 100, 1)');
     gradient.addColorStop(0.5, 'rgba(255, 180, 0, 0.8)');
     gradient.addColorStop(1, 'rgba(255, 100, 0, 0)');
@@ -745,8 +898,7 @@ function drawOrbitingPlanets(state, time) {
         const zLift = radius * Math.sqrt(g_rr(radius)) * render.height * 0.08;
         const py = cy - zLift + twisted.y * render.height * 0.2;
 
-        const rPlan = Math.sqrt(rawX ** 2 + rawY ** 2);
-        const phi = Math.exp(-(rPlan ** 2));
+        const phi = phiField(rawX, rawY);
 
         ctx.beginPath();
         ctx.arc(px, py, size + 5, 0, 2 * Math.PI);
